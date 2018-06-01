@@ -1,0 +1,204 @@
+
+
+[docs]class LEDBoard(LEDCollection):
+    """
+    Extends :class:`LEDCollection` and represents a generic LED board or
+    collection of LEDs.
+
+    The following example turns on all the LEDs on a board containing 5 LEDs
+    attached to GPIO pins 2 through 6::
+
+        from gpiozero import LEDBoard
+
+        leds = LEDBoard(2, 3, 4, 5, 6)
+        leds.on()
+
+    :param int \*pins:
+        Specify the GPIO pins that the LEDs of the board are attached to. You
+        can designate as many pins as necessary. You can also specify
+        :class:`LEDBoard` instances to create trees of LEDs.
+
+    :param bool pwm:
+        If ``True``, construct :class:`PWMLED` instances for each pin. If
+        ``False`` (the default), construct regular :class:`LED` instances. This
+        parameter can only be specified as a keyword parameter.
+
+    :param bool active_high:
+        If ``True`` (the default), the :meth:`on` method will set all the
+        associated pins to HIGH. If ``False``, the :meth:`on` method will set
+        all pins to LOW (the :meth:`off` method always does the opposite). This
+        parameter can only be specified as a keyword parameter.
+
+    :param bool initial_value:
+        If ``False`` (the default), all LEDs will be off initially. If
+        ``None``, each device will be left in whatever state the pin is found
+        in when configured for output (warning: this can be on). If ``True``,
+        the device will be switched on initially. This parameter can only be
+        specified as a keyword parameter.
+
+    :param Factory pin_factory:
+        See :doc:`api_pins` for more information (this is an advanced feature
+        which most users can ignore).
+
+    :param \*\*named_pins:
+        Specify GPIO pins that LEDs of the board are attached to, associating
+        each LED with a property name. You can designate as many pins as
+        necessary and use any names, provided they're not already in use by
+        something else. You can also specify :class:`LEDBoard` instances to
+        create trees of LEDs.
+    """
+    def __init__(self, *args, **kwargs):
+        self._blink_thread = None
+        self._blink_leds = []
+        self._blink_lock = Lock()
+        super(LEDBoard, self).__init__(*args, **kwargs)
+
+[docs]    def close(self):
+        try:
+            self._stop_blink()
+        except AttributeError:
+            pass
+        super(LEDBoard, self).close()
+
+
+[docs]    def on(self, *args):
+        self._stop_blink()
+        if args:
+            for index in args:
+                self[index].on()
+        else:
+            super(LEDBoard, self).on()
+
+
+[docs]    def off(self, *args):
+        self._stop_blink()
+        if args:
+            for index in args:
+                self[index].off()
+        else:
+            super(LEDBoard, self).off()
+
+
+[docs]    def toggle(self, *args):
+        self._stop_blink()
+        if args:
+            for index in args:
+                self[index].toggle()
+        else:
+            super(LEDBoard, self).toggle()
+
+
+[docs]    def blink(
+            self, on_time=1, off_time=1, fade_in_time=0, fade_out_time=0,
+            n=None, background=True):
+        """
+        Make all the LEDs turn on and off repeatedly.
+
+        :param float on_time:
+            Number of seconds on. Defaults to 1 second.
+
+        :param float off_time:
+            Number of seconds off. Defaults to 1 second.
+
+        :param float fade_in_time:
+            Number of seconds to spend fading in. Defaults to 0. Must be 0 if
+            ``pwm`` was ``False`` when the class was constructed
+            (:exc:`ValueError` will be raised if not).
+
+        :param float fade_out_time:
+            Number of seconds to spend fading out. Defaults to 0. Must be 0 if
+            ``pwm`` was ``False`` when the class was constructed
+            (:exc:`ValueError` will be raised if not).
+
+        :param int n:
+            Number of times to blink; ``None`` (the default) means forever.
+
+        :param bool background:
+            If ``True``, start a background thread to continue blinking and
+            return immediately. If ``False``, only return when the blink is
+            finished (warning: the default value of *n* will result in this
+            method never returning).
+        """
+        for led in self.leds:
+            if isinstance(led, LED):
+                if fade_in_time:
+                    raise ValueError('fade_in_time must be 0 with non-PWM LEDs')
+                if fade_out_time:
+                    raise ValueError('fade_out_time must be 0 with non-PWM LEDs')
+        self._stop_blink()
+        self._blink_thread = GPIOThread(
+            target=self._blink_device,
+            args=(on_time, off_time, fade_in_time, fade_out_time, n)
+        )
+        self._blink_thread.start()
+        if not background:
+            self._blink_thread.join()
+            self._blink_thread = None
+
+
+    def _stop_blink(self, led=None):
+        if led is None:
+            if self._blink_thread:
+                self._blink_thread.stop()
+                self._blink_thread = None
+        else:
+            with self._blink_lock:
+                self._blink_leds.remove(led)
+
+[docs]    def pulse(self, fade_in_time=1, fade_out_time=1, n=None, background=True):
+        """
+        Make the device fade in and out repeatedly.
+
+        :param float fade_in_time:
+            Number of seconds to spend fading in. Defaults to 1.
+
+        :param float fade_out_time:
+            Number of seconds to spend fading out. Defaults to 1.
+
+        :param int n:
+            Number of times to blink; ``None`` (the default) means forever.
+
+        :param bool background:
+            If ``True`` (the default), start a background thread to continue
+            blinking and return immediately. If ``False``, only return when the
+            blink is finished (warning: the default value of *n* will result in
+            this method never returning).
+        """
+        on_time = off_time = 0
+        self.blink(
+            on_time, off_time, fade_in_time, fade_out_time, n, background
+        )
+
+
+    def _blink_device(self, on_time, off_time, fade_in_time, fade_out_time, n, fps=25):
+        sequence = []
+        if fade_in_time > 0:
+            sequence += [
+                (i * (1 / fps) / fade_in_time, 1 / fps)
+                for i in range(int(fps * fade_in_time))
+                ]
+        sequence.append((1, on_time))
+        if fade_out_time > 0:
+            sequence += [
+                (1 - (i * (1 / fps) / fade_out_time), 1 / fps)
+                for i in range(int(fps * fade_out_time))
+                ]
+        sequence.append((0, off_time))
+        sequence = (
+                cycle(sequence) if n is None else
+                chain.from_iterable(repeat(sequence, n))
+                )
+        with self._blink_lock:
+            self._blink_leds = list(self.leds)
+            for led in self._blink_leds:
+                if led._controller not in (None, self):
+                    led._controller._stop_blink(led)
+                led._controller = self
+        for value, delay in sequence:
+            with self._blink_lock:
+                if not self._blink_leds:
+                    break
+                for led in self._blink_leds:
+                    led._write(value)
+            if self._blink_thread.stopping.wait(delay):
+                break
